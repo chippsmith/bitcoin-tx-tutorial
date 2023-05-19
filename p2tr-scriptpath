@@ -1,0 +1,156 @@
+import sys
+import json
+
+path_to_bitcoin_functional_test = "/Users/chrissmith/bitcoin/test/functional"
+path_to_bitcoin_tx_tutorial = "/Users/chrissmith/Projects/bitcoin-tx-tutorial"
+
+# Add the functional test framework to our PATH
+sys.path.insert(0, path_to_bitcoin_functional_test)
+from test_framework.test_shell import TestShell
+
+# Add the bitcoin-tx-tutorial functions to our PATH
+sys.path.insert(0, path_to_bitcoin_tx_tutorial)
+from functions import *
+from functions.bip_0340_reference import *
+
+def tagged_hash(tag, msg):
+    tag_hash = sha256(tag.encode())
+    return sha256(tag_hash + tag_hash + msg)
+
+# use same outputs as key path spend for convienince
+
+# OUTPUTS
+# 0x02 for out two outputs
+output_count = bytes.fromhex("02")
+
+# OUTPUT 1 
+output1_value = output1_value_sat.to_bytes(8, byteorder="little", signed=True)
+# 'output1_spk' already defined at the start of the script
+
+# OUTPUT 2
+output2_value = output2_value_sat.to_bytes(8, byteorder="little", signed=True)
+# 'output2_spk' already defined at the start of the script
+
+outputs = (
+    output1_value
+    + varint_len(output1_spk)
+    + output1_spk
+    + output2_value
+    + varint_len(output2_spk)
+    + output2_spk
+)
+
+# script path so spend_type = 02
+spend_type = bytes.fromhex("02")
+
+# sig hash is very similar to keypath spend but we need to append the common signature message extension defined in BIP 342
+# https://github.com/bitcoin/bips/blob/master/bip-0342.mediawiki#common-signature-message-extension
+# https://bitcoin.stackexchange.com/questions/115695/what-are-the-last-bytes-for-in-a-taproot-script-path-sighash/115699#115699
+
+sighash_epoch = bytes.fromhex("00")
+index_of_this_input = bytes.fromhex("0000 0000")
+
+# Control
+hash_type = bytes.fromhex("00") # SIGHASH_DEFAULT (a new sighash type meaning implied SIGHASH_ALL)
+
+# Transaction data
+sha_prevouts = sha256(txid + index)
+
+input_amount_sat = int(2.001 * 100_000_000)
+input_amounts = input_amount_sat.to_bytes(8, byteorder="little", signed=False)
+sha_amounts = sha256(input_amounts)
+sha_scriptpubkeys = sha256(
+    varint_len(spk)
+    + spk
+)
+sha_sequences = sha256(sequence)
+sha_outputs = sha256(outputs)
+
+# these next three variables make up the 'common signature message extension'
+tapleaf_hash = tagged_hash("TapLeaf", TAPSCRIPT_VER + pushbytes(scriptA))
+key_version = bytes.fromhex("00")
+code_separator_pos = bytes.fromhex("ffffffff")
+
+sig_msg = (
+    sighash_epoch
+    + hash_type
+    + version
+    + locktime
+    + sha_prevouts
+    + sha_amounts
+    + sha_scriptpubkeys
+    + sha_sequences
+    + sha_outputs
+    + spend_type # spend_type = 0x02 for script path
+    + index_of_this_input
+    # 'common signature message extension' for script path
+    + tapleaf_hash
+    + key_version
+    + code_separator_pos
+)
+
+tag_hash = sha256("TapSighash".encode())
+sighash = sha256(tag_hash + tag_hash + sig_msg)
+print(sighash.hex())
+
+# sign with private key a which is satisfies to tapleafA
+
+aux_rand = bytes.fromhex("0000000000000000000000000000000000000000000000000000000000000000")
+signatureA = tr.schnorr_sign(sighash, privkeyA, aux_rand)
+# Sighash flag is not appended for SIGHASH_DEFAULT
+
+'''
+witnesses needed for script path spend:
+1. stack elements sarisfying the script
+2. the script
+3. the control block
+
+The control block is made up of a version byte and a byte telling the oddness of the y coordinate of Q,
+as wells as the internal pulbic key and the script inclusion proof.  the script inclusion proof
+is all the opposite leaf hashes on the way up the tap tree. When verifying the verifyin hashes the script,
+concatanates it with the opposite leaf hash then does the same with the branch all the way
+up as many time until it gets to the root.  It then tweaks the internal pubkey and verifies i
+against what?????  need to read bip340.
+
+'''
+
+control_byte = (TAPSCRIPT_VER[0] | negated).to_bytes(1, "big")
+
+control_block = (
+    control_byte
+    + internal_pubkey
+    + taggedhash_leafB
+    + taggedhash_leafC
+    )
+
+# the witness is the signature the script and the control block
+
+witness = (
+    bytes.fromhex("03") 
+    + varint_len(signatureA)
+    + signatureA
+    + varint_len(scriptA)
+    + scriptA
+    + varint_len(control_block)
+    + control_block
+)
+
+# the final transaction is the witness added to the unsigned tx
+
+# the final signed transaction
+signed_script_path_tx = (
+    version
+    + marker
+    + flag
+    + input_count
+    + inputs
+    + output_count
+    + outputs
+    + witness
+    + locktime
+)
+
+print("signed transaction: ",signed_script_path_tx.hex())
+
+result = node.testmempoolaccept(rawtxs=[signed_tx.hex()])
+print(result)

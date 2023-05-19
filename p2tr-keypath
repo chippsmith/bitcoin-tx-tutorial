@@ -1,0 +1,225 @@
+import sys
+import json
+
+path_to_bitcoin_functional_test = "/Users/chrissmith/bitcoin/test/functional"
+path_to_bitcoin_tx_tutorial = "/Users/chrissmith/Projects/bitcoin-tx-tutorial"
+
+# Add the functional test framework to our PATH
+sys.path.insert(0, path_to_bitcoin_functional_test)
+from test_framework.test_shell import TestShell
+
+# Add the bitcoin-tx-tutorial functions to our PATH
+sys.path.insert(0, path_to_bitcoin_tx_tutorial)
+from functions import *
+from functions.bip_0340_reference import *
+
+def tagged_hash(tag, msg):
+    tag_hash = sha256(tag.encode())
+    return sha256(tag_hash + tag_hash + msg)
+
+
+TAPSCRIPT_VER = bytes([0xc0])
+internal_privkey = bytes.fromhex("83a5f1039118fbb4276cac2db41d236c1c1790d97d955c228fa3bde439fbec2a")
+internal_pubkey = tr.pubkey_gen(internal_privkey)
+
+# Derive pay-to-pubkey scripts
+privkeyA = bytes.fromhex("1059bf26660804ced9a3286a16497d7e70692d14dc04e1220c2dbef3667b74f7")
+pubkeyA = tr.pubkey_gen(privkeyA)
+privkeyB = bytes.fromhex("2b22bf11ab862a35f16301c0afc7afe60f66d31fc29645f79c2ab43655e65d33")
+pubkeyB = tr.pubkey_gen(privkeyB)
+privkeyC = bytes.fromhex("7f8b28e51da049bf63e31d3a3261579c0f5c1fc8058c65a79482814e5061f9f6")
+pubkeyC = tr.pubkey_gen(privkeyC)
+
+# Pay to pubkey scripts
+scriptA = b"\x20" + pubkeyA + b"\xac"
+scriptB = b"\x20" + pubkeyB + b"\xac"
+scriptC = b"\x20" + pubkeyC + b"\xac"
+
+# Method: Returns tapbranch hash. Child hashes are lexographically sorted and then concatenated.
+# l: tagged hash of left child
+# r: tagged hash of right child
+def tapbranch_hash(l, r):
+    return tagged_hash("TapBranch", b''.join(sorted([l,r])))
+
+# 1) Compute TapLeaves A, B and C.
+# Method: pushbytes(data) is a function which adds compactsize to input data.
+hash_inputA =  TAPSCRIPT_VER + pushbytes(scriptA)
+hash_inputB =  TAPSCRIPT_VER + pushbytes(scriptB)
+hash_inputC =  TAPSCRIPT_VER + pushbytes(scriptC)
+taggedhash_leafA =  tagged_hash("TapLeaf", hash_inputA)
+taggedhash_leafB =  tagged_hash("TapLeaf", hash_inputB)
+taggedhash_leafC =  tagged_hash("TapLeaf", hash_inputC)
+
+# 2) Compute Internal node TapBranch AB.
+# Method: use tapbranch_hash() function
+internal_nodeAB = tapbranch_hash(taggedhash_leafA, taggedhash_leafB)
+
+# 3) Compute TapTweak.
+rootABC =  tapbranch_hash(internal_nodeAB, taggedhash_leafC)
+taptweak =  tagged_hash("TapTweak", internal_pubkey + rootABC)
+
+# 4) Derive the bech32m address.
+negated, taproot_pubkey = taproot_tweak_pubkey(internal_pubkey, rootABC)
+print("TapTweak:", taptweak.hex())
+spk = bytes.fromhex("5120") + taproot_pubkey
+bech32m_address = spk_to_bech32(spk, 'regtest')
+print('Bech32m address:', bech32m_address)
+
+node = setup_testshell()
+txid_to_spend, index_to_spend = fund_address(node, bech32m_address, 2.001)
+print(f"txid: {txid_to_spend}, {index_to_spend}")
+
+
+# derive taproot priv key with is the internal priv key tweaked by the taproot
+taproot_privkey = taproot_tweak_seckey(internal_privkey, rootABC)
+
+# Set the output scriptPubkeys and amounts
+output1_value_sat = int(float("1.5") * 100000000)
+output1_spk = bytes.fromhex("0014fc7250a211deddc70ee5a2738de5f07817351cef")
+output2_value_sat = int(float("0.5") * 100000000)
+output2_spk = bytes.fromhex("0014531260aa2a199e228c537dfa42c82bea2c7c1f4d")
+output2_spk.hex()
+
+
+### Create unsigned transaction just like segwit V0
+
+# VERSION
+# version '2' indicates that we may use relative timelocks (BIP68)
+version = bytes.fromhex("0200 0000")
+
+# MARKER (new to segwit)
+marker = bytes.fromhex("00")
+
+# FLAG (new to segwit)
+flag = bytes.fromhex("01")
+
+# INPUTS
+# We have just 1 input
+input_count = bytes.fromhex("01")
+
+# Convert txid and index to bytes (little endian)
+txid = (bytes.fromhex(txid_to_spend))[::-1]
+index = index_to_spend.to_bytes(4, byteorder="little", signed=False)
+
+# For the unsigned transaction we use an empty scriptSig
+scriptsig = bytes.fromhex("")
+
+# use 0xffffffff unless you are using OP_CHECKSEQUENCEVERIFY, locktime, or rbf
+sequence = bytes.fromhex("ffff ffff")
+
+inputs = (
+    txid
+    + index
+    + varint_len(scriptsig)
+    + scriptsig
+    + sequence
+)
+
+# OUTPUTS
+# 0x02 for out two outputs
+output_count = bytes.fromhex("02")
+
+# OUTPUT 1 
+output1_value = output1_value_sat.to_bytes(8, byteorder="little", signed=True)
+# 'output1_spk' already defined at the start of the script
+
+# OUTPUT 2
+output2_value = output2_value_sat.to_bytes(8, byteorder="little", signed=True)
+# 'output2_spk' already defined at the start of the script
+
+outputs = (
+    output1_value
+    + varint_len(output1_spk)
+    + output1_spk
+    + output2_value
+    + varint_len(output2_spk)
+    + output2_spk
+)
+
+# LOCKTIME
+locktime = bytes.fromhex("0000 0000")
+
+unsigned_tx = (
+    version
+    + input_count
+    + inputs
+    + output_count
+    + outputs
+    + locktime
+)
+print("unsigned_tx: ", unsigned_tx.hex())
+
+# now we need to compute the sig hash and sign with tweaked internal key
+
+sighash_epoch = bytes.fromhex("00")
+index_of_this_input = bytes.fromhex("0000 0000")
+
+# Control
+hash_type = bytes.fromhex("00") # SIGHASH_DEFAULT (a new sighash type meaning implied SIGHASH_ALL)
+
+# Transaction data
+sha_prevouts = sha256(txid + index)
+
+input_amount_sat = int(2.001 * 100_000_000)
+input_amounts = input_amount_sat.to_bytes(8, byteorder="little", signed=False)
+sha_amounts = sha256(input_amounts)
+
+sha_scriptpubkeys = sha256(
+    varint_len(spk)
+    + spk
+)
+
+sha_sequences = sha256(sequence)
+
+sha_outputs = sha256(outputs) ######
+
+# Data about this input
+spend_type = bytes.fromhex("00") # no annex present
+
+sig_msg = (
+    sighash_epoch
+    + hash_type
+    + version
+    + locktime
+    + sha_prevouts
+    + sha_amounts
+    + sha_scriptpubkeys
+    + sha_sequences
+    + sha_outputs
+    + spend_type
+    + index_of_this_input
+)
+
+tag_hash = sha256("TapSighash".encode())
+sighash = sha256(tag_hash + tag_hash + sig_msg)
+
+# Sign the transaction
+aux_rand = bytes.fromhex("0000000000000000000000000000000000000000000000000000000000000000")
+signature = tr.schnorr_sign(sighash, taproot_privkey, aux_rand)
+# Sighash flag is not appended for SIGHASH_DEFAULT
+
+### add the signature to the witness field of the tx
+
+witness = (
+    bytes.fromhex("01") # one stack item in the witness
+    + pushbytes(signature)
+)
+print(witness.hex())
+
+# the final signed transaction
+signed_tx = (
+    version
+    + marker
+    + flag
+    + input_count
+    + inputs
+    + output_count
+    + outputs
+    + witness
+    + locktime
+)
+
+print("signed transaction: ",signed_tx.hex())
+
+result = node.testmempoolaccept(rawtxs=[signed_tx.hex()])
+print(result)
